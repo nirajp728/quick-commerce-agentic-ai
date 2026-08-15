@@ -112,7 +112,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    START([New cart message]) --> REF{Referential add?<br/>e.g. "add these"}
+    START([New cart message]) --> REF{Referential add, e.g. add these}
     REF -->|yes, offered items exist| ADDOFF[Add previously-offered items]
     REF -->|no| EXTRACT[Extract items: name, qty, action]
 
@@ -144,7 +144,7 @@ flowchart TD
     AUDIT --> CHECK{All 5 slots filled?}
     CHECK -->|no| ASK[Ask for next missing slot]
     ASK --> END1([END, waits for reply])
-    CHECK -->|yes| DUP{Already refunded?<br/>check_existing_refund}
+    CHECK -->|yes| DUP{Already refunded? check_existing_refund}
     DUP -->|yes| BLOCK[Report already refunded]
     DUP -->|no| PRICE[Look up real item price<br/>check_inventory]
     PRICE --> CREDIT[process_refund_credit<br/>+ log to refunds collection]
@@ -162,7 +162,7 @@ Real item pricing (not a flat rate), duplicate-refund protection via a dedicated
 ```mermaid
 flowchart TD
     START([Dispatched query]) --> RETRIEVE[Retrieve context]
-    RETRIEVE --> TYPE{Order-related<br/>keywords?}
+    RETRIEVE --> TYPE{Order-related keywords?}
     TYPE -->|yes| ORDERS[check_order_history tool]
     TYPE -->|no| POLICY[search_store_policies<br/>Atlas Vector Search]
     ORDERS --> GRADE[Grade relevance]
@@ -185,7 +185,7 @@ Self-RAG pattern: retrieve, grade, and — critically — **rewrite the query on
 flowchart TD
     START([Dispatched query]) --> EXTRACT[Extract search terms<br/>via LLM general knowledge]
     EXTRACT --> SEARCH[Check catalog availability<br/>check_inventory per term]
-    SEARCH --> ROUTE{>= 50% found,<br/>or 0 terms?}
+    SEARCH --> ROUTE{50 percent found, or 0 terms?}
     ROUTE -->|yes| COMPILE[Compile availability facts]
     ROUTE -->|no, retries < 2| REFLECT[Broaden search terms] --> EXTRACT
     ROUTE -->|no, retries >= 2| COMPILE
