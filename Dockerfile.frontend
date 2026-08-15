@@ -1,0 +1,21 @@
+FROM python:3.11-slim AS base
+
+WORKDIR /app
+
+COPY frontend/requirements.txt ./frontend/requirements.txt
+RUN pip install --no-cache-dir -r frontend/requirements.txt
+
+COPY frontend ./frontend
+
+# frontend/.streamlit/secrets.toml is NOT copied into the image — on ECS,
+# API_BASE_URL / WS_BASE_URL / ADMIN_WS_TOKEN are read from real
+# environment variables via frontend/utils/config.py's get_secret().
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8501
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" || exit 1
+
+CMD ["streamlit", "run", "frontend/Home.py", "--server.port=8501", "--server.address=0.0.0.0"]
