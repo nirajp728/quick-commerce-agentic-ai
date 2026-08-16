@@ -30,7 +30,8 @@ Built as a full-stack, production-shaped reference implementation: FastAPI backe
 ## Features
 
 - **Omnichannel** — same LangGraph engine serves both WhatsApp (via Twilio) and a Streamlit web storefront, keyed by `thread_id`.
-- **Dynamic intent routing** — a router node reads the full conversation transcript each turn and classifies intent (`cart`, `refund`, `qa`, `discovery`, `handoff`, `clarify`), asking a clarifying question when it doesn't have enough information rather than guessing.
+- **Dynamic intent routing** — a router node reads the full conversation transcript each turn and classifies intent (`cart`, `refund`, `qa`, `discovery`, `handoff`, `clarify`, `refuse`), asking a clarifying question when it doesn't have enough information rather than guessing.
+- **Safety refusal** — requests for anything dangerous, illegal, or harmful are classified as `refuse` before any other routing logic runs, and declined outright with no escalation framing — never routed to handoff, cart, or any subgraph.
 - **Planner/dispatcher/answer separation** — `qa` and `discovery` intents route through a planner that decides which gathering subgraph(s) to invoke and forms self-contained queries for each; a single answer node then writes the final reply using the model's own general knowledge layered with gathered store-specific facts (stock, price, policy, order history).
 - **Multi-item cart management** — add/remove multiple items with quantities in one message, typo-corrected against real catalog vocabulary, with immediate in-stock alternatives offered when an item isn't found.
 - **Slot-filling refund flow** — persistent multi-turn refund flow with real item pricing, duplicate-refund protection, and photo/media evidence capture.
@@ -347,8 +348,10 @@ Covers: router intent mapping, refund audit/pricing/dedup logic, QA retry-cycle 
 
 CI/CD via GitHub Actions (`.github/workflows/ci_cd.yml`): runs tests → builds and pushes Docker images to ECR → deploys to ECS Fargate.
 
-- **Backend**: ECS Fargate → API Gateway (HTTP API) → VPC Link → NLB → ECS. `/ws/admin` bypasses API Gateway, routed directly through the NLB.
-- **Frontend**: ECS Fargate (Streamlit requires a live server, not static hosting) → CloudFront as CDN/TLS layer, with a cache invalidation step on every deploy.
+- **Backend**: ECS Fargate (single task) → API Gateway (HTTP API, TLS via ACM) → VPC Link → NLB → ECS. `/ws/admin` bypasses API Gateway entirely, routed directly through the NLB on a separate listener, since HTTP APIs don't proxy raw WebSocket connections.
+- **Frontend**: ECS Fargate (Streamlit requires a live server, not static hosting) → NLB directly → users. No CDN layer — evaluated CloudFront and deliberately excluded it, since the app is session-driven and dynamic (WebSocket reruns, live chat) with little genuinely cacheable content, so it added cost and a cache-invalidation step without a real latency or reliability benefit.
+- **No ALB** — a single backend task has nothing to load-balance across, so NLB (Layer 4, cheaper, and a more natural fit for the WebSocket route) is sufficient; ALB's routing/algorithm features aren't needed without multiple targets.
+- **Rate limiting**: configured at the API Gateway stage level (throttling: requests/second + burst limit), protecting against runaway LLM API costs from request abuse — independent of backend task count.
 
 ---
 
@@ -356,6 +359,7 @@ CI/CD via GitHub Actions (`.github/workflows/ci_cd.yml`): runs tests → builds 
 
 - Single shared demo account across web and WhatsApp — no per-user authentication.
 - Admin WebSocket auth is a single shared token, not per-agent identity.
-- Running multiple backend ECS tasks concurrently means an admin connected to one task won't receive broadcasts fired from another (in-memory `ConnectionManager`, not a distributed pub/sub).
+- Runs a single backend ECS task by design — `ConnectionManager`'s admin WebSocket state is in-memory, so scaling to multiple concurrent backend tasks would need a distributed pub/sub (e.g. Redis) for handoff broadcasts to reach an admin connected to a different task than the one that triggered the alert.
+- The `refuse` intent is LLM-classified, not backed by a dedicated moderation API — a reasonable mitigation for a demo/portfolio project, but not a hard guarantee the way a non-LLM classifier layer would be in a production system handling arbitrary public traffic.
 - `check_inventory`'s typo correction is vocabulary-based (`difflib`), not a true fuzzy/semantic product search.
 - Two dashboard metrics (AI Resolution Rate, Avg Sentiment Score) are placeholder values, not computed from real data.
