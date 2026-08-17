@@ -302,8 +302,8 @@ In Atlas → your cluster → Search → **Create Search Index** → JSON Editor
 ### Run
 
 ```bash
-# Backend
-PYTHONPATH=. python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+# Backend (runs both the main API on 8000 and the admin WebSocket on 8001)
+PYTHONPATH=. python -m backend.app.run
 
 # Frontend (separate terminal)
 PYTHONPATH=. streamlit run frontend/Home.py
@@ -323,12 +323,13 @@ PYTHONPATH=. streamlit run frontend/Home.py
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | No | Required only for WhatsApp |
 | `CLOUDINARY_*` | No | Required only for image uploads |
 | `ADMIN_WS_TOKEN` | Recommended | Shared-secret auth for `/ws/admin` |
+| `ADMIN_WS_PORT` | No (defaults to 8001) | The admin WebSocket runs on its own port, in the same process as the main API, so `ConnectionManager`'s in-memory state stays shared for handoff broadcasts |
 
 **`frontend/.streamlit/secrets.toml`**
 
 ```toml
 API_BASE_URL = "http://localhost:8000"
-WS_BASE_URL = "ws://localhost:8000"
+WS_BASE_URL = "ws://localhost:8001"
 ADMIN_WS_TOKEN = "same value as backend"
 ```
 
@@ -348,7 +349,7 @@ Covers: router intent mapping, refund audit/pricing/dedup logic, QA retry-cycle 
 
 CI/CD via GitHub Actions (`.github/workflows/ci_cd.yml`): runs tests → builds and pushes Docker images to ECR → deploys to ECS Fargate.
 
-- **Backend**: ECS Fargate (single task) → API Gateway (HTTP API, TLS via ACM) → VPC Link → NLB → ECS. `/ws/admin` bypasses API Gateway entirely, routed directly through the NLB on a separate listener, since HTTP APIs don't proxy raw WebSocket connections.
+- **Backend**: ECS Fargate (single task) runs two ports in one process — the main API on **8000** (fronted by API Gateway → VPC Link → NLB) and the admin WebSocket (`/ws/admin`) on its own port **8001**, routed directly through a separate NLB listener that bypasses API Gateway entirely, since HTTP APIs don't proxy raw WebSocket connections. Both ports share the same process so `ConnectionManager`'s in-memory handoff-broadcast state stays valid.
 - **Frontend**: ECS Fargate (Streamlit requires a live server, not static hosting) → NLB directly → users. No CDN layer — evaluated CloudFront and deliberately excluded it, since the app is session-driven and dynamic (WebSocket reruns, live chat) with little genuinely cacheable content, so it added cost and a cache-invalidation step without a real latency or reliability benefit.
 - **No ALB** — a single backend task has nothing to load-balance across, so NLB (Layer 4, cheaper, and a more natural fit for the WebSocket route) is sufficient; ALB's routing/algorithm features aren't needed without multiple targets.
 - **Rate limiting**: configured at the API Gateway stage level (throttling: requests/second + burst limit), protecting against runaway LLM API costs from request abuse — independent of backend task count.
