@@ -10,7 +10,7 @@ env:
   ECR_REPOSITORY_FRONTEND: quick-commerce-frontend
   ECS_CLUSTER: quick-commerce-cluster
   ECS_SERVICE_BACKEND: quick-commerce-backend-service
-  ECS_SERVICE_FRONTEND: quick-commerce-frontend-service
+  ECS_SERVICE_FRONTEND: quick-commerce-frontend
 
 jobs:
   build-and-push:
