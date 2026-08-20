@@ -10,6 +10,5 @@ def get_secret(key: str, default: str = "") -> str:
     """
     try:
         return st.secrets.get(key, os.environ.get(key, default))
-    except FileNotFoundError:
-        # st.secrets raises if no secrets.toml exists at all locally
+    except Exception:
         return os.environ.get(key, default)

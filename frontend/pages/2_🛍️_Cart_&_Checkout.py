@@ -1,9 +1,12 @@
 import streamlit as st
 import requests
+from frontend.utils.config import get_secret
 
 st.set_page_config(page_title="Checkout | Quick-Commerce", page_icon="🛍️", layout="centered")
 
-API_BASE_URL = st.secrets.get("API_BASE_URL", "http://localhost:8000")
+
+
+API_BASE_URL = get_secret("API_BASE_URL", "http://localhost:8000")
 DEMO_PHONE = "whatsapp:+919876543210"  # see note in Profile.py
 
 st.title("🛍️ Secure Checkout")
