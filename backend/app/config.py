@@ -1,7 +1,8 @@
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Literal
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"  # backend/.env, regardless of cwd
@@ -78,6 +79,33 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=True,
     )
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def _normalize_cors_origins(cls, v):
+        """
+        Tolerates one common, easy-to-make misconfiguration: a JSON array
+        with unquoted URL strings, e.g. [http://example.com:8501] instead
+        of the valid ["http://example.com:8501"]. This exact mistake once
+        caused a real production crash loop (JSONDecodeError on startup)
+        that took several deploy cycles to diagnose, since CI happily
+        passes an env var that merely LOOKS like a JSON array. If the raw
+        string matches that specific unquoted-array pattern, each item is
+        auto-quoted before Pydantic attempts to parse it as JSON. Anything
+        that doesn't match this narrow pattern is left untouched and will
+        still fail loudly downstream, exactly as before — this does not
+        weaken the production wildcard-rejection check below.
+        """
+        if not isinstance(v, str):
+            return v
+        stripped = v.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            inner = stripped[1:-1].strip()
+            if inner and not inner.startswith('"'):
+                items = [item.strip() for item in inner.split(",")]
+                quoted = ", ".join(f'"{item}"' for item in items if item)
+                return f"[{quoted}]"
+        return v
 
     @model_validator(mode="after")
     def _lock_down_production(self) -> "Settings":
