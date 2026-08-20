@@ -1,8 +1,8 @@
 # Quick-Commerce Agentic AI Contact Center
 
-Omnichannel agentic AI for quick-commerce — a LangGraph-orchestrated router, planner/dispatcher, and human handoff system across **WhatsApp** and **web**, with cart management, refund processing, and RAG-grounded Q&A/discovery flows backed by **MongoDB Atlas Vector Search**.
+Omnichannel agentic AI for quick-commerce — a LangGraph-orchestrated pipeline (ingestion → clarification → planner → dispatcher → answer) across **WhatsApp** and **web**, with cart management, refund processing (validated against real order data), and Corrective RAG (CRAG) policy/general-knowledge Q&A backed by **MongoDB Atlas Search**.
 
-Built as a full-stack, production-shaped reference implementation: FastAPI backend, Streamlit frontend, real LangGraph state machines with cycles and checkpointing, live WebSocket human handoff, and a CI/CD pipeline targeting AWS (ECS + API Gateway + CloudFront).
+Built as a full-stack, production-shaped reference implementation: FastAPI backend, Streamlit frontend, real LangGraph state machines with cycles and checkpointing, live WebSocket human handoff, and a CI/CD pipeline deploying to AWS ECS Fargate behind Network Load Balancers.
 
 ---
 
@@ -14,14 +14,13 @@ Built as a full-stack, production-shaped reference implementation: FastAPI backe
 - [Master Graph](#master-graph)
 - [Cart Subgraph](#cart-subgraph)
 - [Refund Subgraph](#refund-subgraph)
-- [QA Subgraph (Gathering)](#qa-subgraph-gathering)
-- [Discovery Subgraph (Gathering)](#discovery-subgraph-gathering)
+- [QA Subgraph — Corrective RAG](#qa-subgraph--corrective-rag)
+- [Discovery Subgraph](#discovery-subgraph)
 - [Planner → Dispatcher → Answer Flow](#planner--dispatcher--answer-flow)
 - [Tools Reference](#tools-reference)
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
 - [Environment Variables](#environment-variables)
-- [Running Tests](#running-tests)
 - [Deployment](#deployment)
 - [Known Limitations](#known-limitations)
 
@@ -29,16 +28,16 @@ Built as a full-stack, production-shaped reference implementation: FastAPI backe
 
 ## Features
 
-- **Omnichannel** — same LangGraph engine serves both WhatsApp (via Twilio) and a Streamlit web storefront, keyed by `thread_id`.
-- **Dynamic intent routing** — a router node reads the full conversation transcript each turn and classifies intent (`cart`, `refund`, `qa`, `discovery`, `handoff`, `clarify`, `refuse`), asking a clarifying question when it doesn't have enough information rather than guessing.
-- **Safety refusal** — requests for anything dangerous, illegal, or harmful are classified as `refuse` before any other routing logic runs, and declined outright with no escalation framing — never routed to handoff, cart, or any subgraph.
-- **Planner/dispatcher/answer separation** — `qa` and `discovery` intents route through a planner that decides which gathering subgraph(s) to invoke and forms self-contained queries for each; a single answer node then writes the final reply using the model's own general knowledge layered with gathered store-specific facts (stock, price, policy, order history).
-- **Multi-item cart management** — add/remove multiple items with quantities in one message, typo-corrected against real catalog vocabulary, with immediate in-stock alternatives offered when an item isn't found.
-- **Slot-filling refund flow** — persistent multi-turn refund flow with real item pricing, duplicate-refund protection, and photo/media evidence capture.
-- **Self-RAG policy Q&A** — retrieve → grade → retry-with-rewritten-query → fallback loop over a MongoDB Atlas Vector Search index, with LLM fallback chain (Gemini → Groq → OpenAI).
-- **Human-in-the-loop handoff** — sentiment/explicit-request triggered pause via LangGraph `interrupt_after`, broadcast to a live admin dashboard over WebSockets, with real-time reply relay and resume.
-- **Multi-modal ingestion** — image, audio (Whisper transcription), and PDF (Docling) support on both channels.
-- **Full CI/CD** — GitHub Actions pipeline building Docker images, running pytest, and deploying to ECS behind API Gateway (backend) and CloudFront (frontend).
+- **Omnichannel** — one LangGraph engine serves both WhatsApp (via Twilio) and a Streamlit web storefront, keyed by `thread_id`.
+- **Ingestion node** — extracts text from any attached media (image, audio, PDF) before the rest of the graph ever sees the message, so multi-modal input is treated as first-class conversational content.
+- **Clarification gate** — judges whether the current message is clear enough to act on, capped at 4 attempts before automatic handoff. Grounds its own clarifying questions in real catalog data (via a live inventory lookup) rather than inventing product names.
+- **Planner/dispatcher/answer separation** — a planner reads the full conversation and decides which subgraph(s) — cart, refund, qa, discovery, any combination — are needed for the current turn, and forms a self-contained instruction for each. Transactional subgraphs (cart, refund) write their own authoritative reply; a dedicated answer node only synthesizes replies for pure informational gathering (qa/discovery), and is explicitly barred from ever claiming a transactional outcome it didn't perform.
+- **Corrective RAG (CRAG) policy Q&A** — retrieves from the vector index, grades the result (correct / ambiguous / incorrect), and only falls through to a live Tavily web search when local data is insufficient. Order-history lookups are a direct DB fact check and bypass grading entirely — never treated as a knowledge-retrieval problem.
+- **Multi-item cart** — add/remove/view/clear via natural phrasing, with real-time fuzzy product search, quantity merging across repeated adds, and an explicit "how many?" clarification when a remove request is ambiguous.
+- **Refund flow validated against real orders** — every refund is checked against the user's actual order data before crediting: does the order exist, was the item actually in it, has it already been refunded. Rejects fabricated or mismatched items outright, and writes a real, queryable record to a `refunds` collection.
+- **Safety refusal** — dangerous/illegal requests are classified and declined before any other routing logic runs, with no escalation framing.
+- **Human-in-the-loop handoff** — sentiment/explicit-request triggered pause via LangGraph's `interrupt_after`, broadcast in real time to a live admin dashboard over WebSockets, with reply relay and resume.
+- **Multi-modal on both channels** — real vision description (not just image storage), Whisper transcription, and Docling PDF extraction.
 
 ---
 
@@ -48,14 +47,15 @@ Built as a full-stack, production-shaped reference implementation: FastAPI backe
 |---|---|
 | Orchestration | LangGraph (`StateGraph`, cycles, `interrupt_after`, `MongoDBSaver` checkpointer) |
 | LLM | Google Gemini (primary) with Groq / OpenAI fallback via `.with_fallbacks()` |
-| Backend | FastAPI, Uvicorn |
+| Backend | FastAPI, Uvicorn (dual-port, single process) |
 | Frontend | Streamlit |
-| Database | MongoDB Atlas (transactional collections + native `$vectorSearch`) |
+| Database | MongoDB Atlas (transactional collections + native `$search` full-text/fuzzy + `$vectorSearch`) |
 | Embeddings | `sentence-transformers` (`all-MiniLM-L6-v2`) |
+| Web search | Tavily (CRAG fallback for the QA subgraph) |
 | Messaging | Twilio WhatsApp API |
 | Media | OpenAI Whisper (audio), Cloudinary (images), Docling (PDF) |
 | Real-time | Native WebSockets (admin handoff), polling (web chat resume) |
-| Infra | Docker, GitHub Actions, AWS ECS Fargate, API Gateway, CloudFront |
+| Infra | Docker, GitHub Actions, AWS ECS Fargate, Network Load Balancers |
 
 ---
 
@@ -69,7 +69,7 @@ flowchart TD
     WH --> ENGINE[LangGraph Master Engine]
     CR --> ENGINE
 
-    ENGINE --> MONGO[(MongoDB Atlas<br/>CRUD + Vector Search)]
+    ENGINE --> MONGO[(MongoDB Atlas<br/>CRUD + Search + Vector Search)]
     ENGINE -->|handoff broadcast| WS[WebSocket Manager]
     WS --> ADMIN[Streamlit Admin Dashboard]
     ADMIN -->|resume / reply| WS
@@ -82,30 +82,31 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    START([Incoming Message]) --> ROUTER[Router Node]
-    ROUTER -->|full transcript classified| ROUTE{route_intent}
+    START([Incoming Message]) --> INGEST[Ingestion Node<br/>extracts attachment text]
+    INGEST --> CLARIFY[Clarification Node]
 
-    ROUTE -->|cart| CART[Cart Subgraph]
-    ROUTE -->|refund| REFUND[Refund Subgraph]
-    ROUTE -->|qa / discovery| PLANNER[Planner Node]
-    ROUTE -->|handoff or low sentiment| HANDOFF[Handoff Node]
-    ROUTE -->|clarify| AGG
+    CLARIFY -->|clear| PLANNER[Planner Node]
+    CLARIFY -->|unclear, attempts less than 4| ASK[Ask clarifying question]
+    CLARIFY -->|unclear, 4 attempts reached| HANDOFF[Handoff Node]
+    CLARIFY -->|explicit request / low sentiment| HANDOFF
+    CLARIFY -->|dangerous / out of scope| REFUSE[Refuse: END]
 
     PLANNER --> DISPATCH[Dispatcher Node]
-    DISPATCH --> ANSWER[Answer Node]
-
-    CART --> AGG[Aggregator Node]
-    REFUND --> AGG
+    DISPATCH -->|cart or refund produced own message| AGG[Aggregator Node]
+    DISPATCH -->|qa/discovery gathered facts only| ANSWER[Answer Node]
     ANSWER --> AGG
 
-    AGG --> END1([END])
+    ASK --> END1([END])
+    AGG --> END1
     HANDOFF -->|interrupt_after| END2([END, paused for admin])
+    REFUSE --> END1
 ```
 
 **Key design decisions:**
-- `cart` and `refund` bypass the planner entirely — they're mutation/transaction flows, not gather-then-answer questions.
+- The **clarification node** only judges whether a message is coherent and in-scope — it has no knowledge of any subgraph's internal state. This keeps it bounded in complexity regardless of how many stateful subgraphs exist.
+- The **planner** decides subgraph dispatch every turn based on the full conversation plus a fact-based note about any subgraph left mid-flow (e.g. an incomplete refund) — not a separate topic-switch classifier. A stateful subgraph's data simply persists in `AgentState` until it finishes; nothing needs to "protect" it from interruption.
+- **Answer node never runs after a transactional message.** If cart or refund produced its own reply this turn, `route_after_dispatch` sends execution straight to the aggregator — this closes a real bug where the answer node once fabricated a "refund completed" message from conversational context alone, with no actual transaction behind it.
 - `interrupt_after=["handoff"]` (not `interrupt_before`) ensures the handoff exit message actually sends before the graph pauses, and resuming continues past the node instead of re-triggering it.
-- The router reads the **full conversation transcript** every turn, not just the latest message — this lets it correctly re-classify mid-flow (e.g. a user asking an unrelated question in the middle of a refund).
 
 ---
 
@@ -113,26 +114,35 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    START([New cart message]) --> REF{Referential add, e.g. add these}
+    START([New cart message]) --> VIEW{View cart request?}
+    VIEW -->|yes| SHOW[Return current cart contents]
+    VIEW -->|no| CLEAR{Clear cart request?}
+    CLEAR -->|yes| WIPE[Empty chat_cart]
+    CLEAR -->|no| REF{Referential add,<br/>e.g. add these}
+
     REF -->|yes, offered items exist| ADDOFF[Add previously-offered items]
     REF -->|no| EXTRACT[Extract items: name, qty, action]
 
     EXTRACT --> LOOP{For each item}
-    LOOP -->|action=add| CHECK[check_inventory tool]
-    CHECK -->|found| ADD[Append to chat_cart]
+    LOOP -->|add| CHECK[check_inventory<br/>Atlas Search fuzzy match]
+    CHECK -->|found| ADD[Merge into chat_cart]
     CHECK -->|not found| ALT[Search alternatives, offer in same reply]
-    LOOP -->|action=remove| MATCH[Match against chat_cart]
+    LOOP -->|remove, qty stated| MATCH[Match against chat_cart]
+    LOOP -->|remove, qty unstated| ASKQTY[Ask how many to remove]
     MATCH -->|found| REMOVE[Decrement / remove from chat_cart]
     MATCH -->|not found| NOTIN[Report not in cart]
 
-    ADDOFF --> END([END])
+    SHOW --> END([END])
+    WIPE --> END
+    ADDOFF --> END
     ADD --> END
     ALT --> END
+    ASKQTY --> END
     REMOVE --> END
     NOTIN --> END
 ```
 
-Single-node subgraph. Handles multi-item add/remove in one message, typo correction (via `difflib` against real catalog vocabulary), and resolves referential phrasing ("add this", "add all of these") against whatever was last offered by discovery.
+Single-node subgraph. Real-time fuzzy product search via MongoDB Atlas `$search` (Lucene-based edit-distance matching, ranks name matches above incidental tag/category matches). Repeated adds of the same product merge into one line rather than duplicating entries. A remove request with no stated quantity asks for clarification instead of guessing — "remove butter" most naturally means "all of it," not "exactly one unit."
 
 ---
 
@@ -145,55 +155,51 @@ flowchart TD
     AUDIT --> CHECK{All 5 slots filled?}
     CHECK -->|no| ASK[Ask for next missing slot]
     ASK --> END1([END, waits for reply])
-    CHECK -->|yes| DUP{Already refunded? check_existing_refund}
-    DUP -->|yes| BLOCK[Report already refunded]
-    DUP -->|no| PRICE[Look up real item price<br/>check_inventory]
-    PRICE --> CREDIT[process_refund_credit<br/>+ log to refunds collection]
+    CHECK -->|yes| VALIDATE[validate_refund_request:<br/>order exists? item in order? already refunded?]
+    VALIDATE -->|invalid| REJECT[Report exact reason, clear slots]
+    VALIDATE -->|valid| CREDIT[process_refund_credit<br/>real order price, log to refunds collection]
     CREDIT --> CLEAR[Clear slots]
-    BLOCK --> END2([END])
+    REJECT --> END2([END])
     CLEAR --> END2
 ```
 
-Real item pricing (not a flat rate), duplicate-refund protection via a dedicated `refunds` collection, and real photo URLs from the multi-modal ingestion pipeline (falling back to a keyword-detected mock only on the text-only path). Slot persistence across turns relies on the checkpointer, not an internal graph loop — this is what lets a user pivot to an unrelated question mid-refund and return to it later without losing progress.
+Every refund is validated against the user's **actual order data** before anything is credited — not just a duplicate-refund check. `validate_refund_request` confirms the order exists for this user, the claimed item was genuinely part of it, and it hasn't already been refunded, returning the real catalog item name and its real recorded price. This closed a real, serious bug: attached-image vision descriptions were being extracted as refund item names by the slot-extraction step (an unrelated laptop photo produced a refund attempt for "ASUS Expertbook" against a grocery order) — extraction now explicitly excludes image-description text as a data source, and validation is the hard backstop regardless.
 
 ---
 
-## QA Subgraph (Gathering)
+## QA Subgraph — Corrective RAG
 
 ```mermaid
 flowchart TD
-    START([Dispatched query]) --> RETRIEVE[Retrieve context]
-    RETRIEVE --> TYPE{Order-related keywords?}
-    TYPE -->|yes| ORDERS[check_order_history tool]
-    TYPE -->|no| POLICY[search_store_policies<br/>Atlas Vector Search]
-    ORDERS --> GRADE[Grade relevance]
-    POLICY --> GRADE
-    GRADE --> DECISION{Relevant?}
-    DECISION -->|yes| DONE[Return raw gathered_context]
-    DECISION -->|no, retries < 3| REWRITE[Rewrite query] --> RETRIEVE
-    DECISION -->|no, retries >= 3| FALLBACK[Fallback: report no info found]
-    DONE --> END([END])
-    FALLBACK --> END
+    START([Dispatched query]) --> RETRIEVE[Retrieve Node]
+    RETRIEVE -->|order-history keywords| ORDERLOOKUP[Order Lookup Node<br/>check_order_history, forced grade=correct]
+    RETRIEVE -->|policy/general query| POLICYLOOKUP[Policy Lookup Node<br/>search_store_policies, Atlas Vector Search]
+
+    ORDERLOOKUP --> GENERATE[Generate Node]
+    POLICYLOOKUP --> GRADE[Grade Node: correct / ambiguous / incorrect]
+
+    GRADE -->|correct| GENERATE
+    GRADE -->|ambiguous or incorrect| WEBSEARCH[Web Search Node<br/>Tavily]
+    WEBSEARCH --> GENERATE
 ```
 
-Self-RAG pattern: retrieve, grade, and — critically — **rewrite the query on failure** rather than resending the identical query against the identical index. Returns raw gathered facts only; does not write the user-facing reply itself (that's the shared Answer Node's job).
+Genuine Corrective RAG, not Self-RAG: retrieval is graded, and the grade determines the correction action — `correct` skips web search entirely (policy questions land here, since the vector index genuinely has that data), `ambiguous`/`incorrect` triggers a live Tavily search. Order-history lookups are structurally routed around the grader altogether — a private order ID is a direct database fact, not something a live web search should ever be asked about. Retrieved JSON is converted to plain, filtered prose (scoped to the specific order or item asked about) before being handed to the generation model — raw multi-order JSON blobs were found to cause the model to misread genuinely present data as "not found."
 
 ---
 
-## Discovery Subgraph (Gathering)
+## Discovery Subgraph
 
 ```mermaid
 flowchart TD
     START([Dispatched query]) --> EXTRACT[Extract search terms<br/>via LLM general knowledge]
     EXTRACT --> SEARCH[Check catalog availability<br/>check_inventory per term]
-    SEARCH --> ROUTE{50 percent found, or 0 terms?}
-    ROUTE -->|yes| COMPILE[Compile availability facts]
+    SEARCH --> ROUTE{50% found, or 0 terms?}
+    ROUTE -->|yes| COMPILE[Compile plain availability facts]
     ROUTE -->|no, retries < 2| REFLECT[Broaden search terms] --> EXTRACT
     ROUTE -->|no, retries >= 2| COMPILE
-    COMPILE --> END([END])
 ```
 
-Deliberately narrow scope: discovery only ever answers "is X available and at what price" — it never defines what a dish's ingredients are or judges factual correctness. That's handled by the LLM's own general knowledge inside the Answer Node, layered on top of these store-specific facts. This split fixed a real bug where the subgraph's own (sometimes incorrect) ingredient extraction was being presented as fact instead of just an availability check.
+Deliberately narrow: discovery only ever answers "is X available, at what price" — it never asserts what a dish needs or judges factual/dietary correctness. That judgment belongs entirely to the answer node's own general knowledge, applied on top of these store-specific facts. This split fixed a real bug where the subgraph's own ingredient guesses (occasionally factually wrong, e.g. suggesting meat for a vegetarian dish) were being presented as fact instead of a plain stock check.
 
 ---
 
@@ -201,18 +207,24 @@ Deliberately narrow scope: discovery only ever answers "is X available and at wh
 
 ```mermaid
 flowchart TD
-    ROUTER[Router: intent = qa or discovery] --> PLANNER[Planner Node]
-    PLANNER -->|reads full transcript,<br/>knows what discovery / qa can do| PLAN[Forms 0-N dispatch tasks<br/>with self-contained queries]
+    CLARIFY[Clarification: clear] --> PLANNER[Planner Node]
+    PLANNER -->|reads full transcript +<br/>any subgraph left mid-flow| PLAN[Forms 0-N dispatch tasks<br/>across cart / refund / qa / discovery]
     PLAN --> DISPATCH[Dispatcher Node]
-    DISPATCH -->|target=discovery| DGRAPH[Discovery Subgraph]
+
+    DISPATCH -->|target=cart| CART[Cart Subgraph]
+    DISPATCH -->|target=refund| REFUND[Refund Subgraph]
     DISPATCH -->|target=qa| QGRAPH[QA Subgraph]
-    DGRAPH --> COLLECT[gathered_context]
-    QGRAPH --> COLLECT
+    DISPATCH -->|target=discovery| DGRAPH[Discovery Subgraph]
+
+    CART -->|own message| DIRECT[Authoritative reply, skip Answer Node]
+    REFUND -->|own message| DIRECT
+    QGRAPH --> COLLECT[gathered_context]
+    DGRAPH --> COLLECT
     COLLECT --> ANSWER[Answer Node]
-    ANSWER -->|LLM general knowledge<br/>+ gathered store facts| REPLY[Final user-facing reply]
+    ANSWER -->|LLM general knowledge<br/>+ gathered store facts| REPLY[Final reply]
 ```
 
-This is the core architectural pattern of the system: **the planner scopes the question, gathering subgraphs are pure fact-finders, and exactly one node writes the final answer.** A general-knowledge question ("what are pav bhaji's ingredients") needs zero dispatched tasks; a store-specific question ("do you have amul butter") dispatches to discovery; a mixed question dispatches only the part that genuinely needs real data, and the LLM's own knowledge covers the rest.
+The core pattern: **the planner scopes the turn, gathering subgraphs are pure fact-finders, transactional subgraphs speak for themselves, and the answer node only ever synthesizes non-transactional information.** A single message can dispatch to more than one target — e.g. "what do I need for a sandwich and do you have any of it, add what's available" needs both a discovery/qa check and a cart mutation in the same turn. A deterministic (non-LLM) keyword fallback in the dispatcher also forces a `qa` order-lookup task whenever a refund is mid-flow and the message looks like it's asking about order contents, since the planner's own judgment on this specific pattern proved unreliable even with a strongly-worded prompt.
 
 ---
 
@@ -220,12 +232,14 @@ This is the core architectural pattern of the system: **the planner scopes the q
 
 | Tool | File | Purpose |
 |---|---|---|
-| `check_inventory` | `tools/db_tools.py` | Typo-corrected, in-stock-filtered MongoDB query against the `products` collection |
-| `check_existing_refund` | `tools/db_tools.py` | Prevents duplicate refund credit for the same order/item |
+| `check_inventory` | `tools/db_tools.py` | Fuzzy MongoDB Atlas `$search` query against `products` (name/tags/category), filtered to in-stock items |
+| `validate_refund_request` | `tools/db_tools.py` | Confirms an order exists, the item was actually in it, and it hasn't already been refunded — returns the real matched item name and price |
 | `process_refund_credit` | `tools/db_tools.py` | Atomic wallet credit + refund history log |
 | `check_order_history` | `tools/db_tools.py` | Schema-aware query against the `orders` collection |
 | `search_store_policies` | `tools/vector_tool.py` | MongoDB Atlas `$vectorSearch` against the `policies` collection (`all-MiniLM-L6-v2` embeddings) |
+| `web_search` | `tools/tavily_tool.py` | Tavily live web search, used by QA's CRAG correction path |
 | `transcribe_audio_bytes` / `transcribe_audio` | `services/media_ingestion.py` | Whisper ASR (bytes-based core + Twilio URL wrapper) |
+| `describe_image_bytes` / `describe_image` | `services/media_ingestion.py` | Vision description via Gemini's multimodal input — what makes an attached image actually understood, not just stored |
 | `upload_image_bytes_to_cloud` / `upload_image_to_cloud` | `services/media_ingestion.py` | Cloudinary upload |
 | `extract_pdf_text` / `extract_pdf_from_twilio` | `services/media_ingestion.py` | Docling layout-aware PDF → text |
 | `send_whatsapp_message` | `services/twilio_service.py` | Outbound Twilio WhatsApp send |
@@ -240,14 +254,18 @@ backend/
 │   ├── api/            # chat_routes, webhooks, ws_routes, products/profile/checkout routes
 │   ├── db/              # mongo_client, seed_db
 │   ├── graph/
-│   │   ├── nodes/       # router_planner, planner_node, dispatcher_node, answer_node, handoff_node, aggregator
+│   │   ├── nodes/       # ingestion_node, clarification_node, planner_node, dispatcher_node,
+│   │   │                #   answer_node, handoff_node, aggregator
 │   │   ├── subgraphs/   # cart_graph, refund_graph, qa_graph, discovery_graph
 │   │   ├── master_graph.py
 │   │   └── state.py
 │   ├── services/        # media_ingestion, twilio_service, ws_connection_manager
-│   ├── tools/            # db_tools, vector_tool
+│   ├── tools/            # db_tools, vector_tool, tavily_tool
 │   ├── utils/            # llm_factory
-│   └── config.py
+│   ├── config.py
+│   ├── main.py           # main API app (port 8000)
+│   ├── admin_app.py      # admin WebSocket app (port 8001)
+│   └── run.py             # entrypoint: runs both apps in one process via asyncio.gather
 └── tests/
 frontend/
 ├── components/           # chat_widget, cart_sidebar, product_card
@@ -257,6 +275,8 @@ frontend/
 .github/workflows/ci_cd.yml
 Dockerfile.backend
 Dockerfile.frontend
+backend-task-def.json
+frontend-task-def.json
 ```
 
 ---
@@ -265,8 +285,8 @@ Dockerfile.frontend
 
 ### Prerequisites
 - Python 3.11
-- A MongoDB Atlas cluster with a Vector Search index (see below)
-- API keys: Gemini (required), Twilio, Cloudinary (optional, for WhatsApp media)
+- A MongoDB Atlas cluster with **two** search indexes (see below)
+- API keys: Gemini (required), Tavily (required for CRAG's web-search path), Twilio, Cloudinary (optional, for WhatsApp media)
 
 ### Setup
 
@@ -286,9 +306,9 @@ Create `backend/.env` (see [Environment Variables](#environment-variables)) and 
 python -m backend.app.db.seed_db
 ```
 
-### Create the Vector Search index
+### Create the two Atlas search indexes
 
-In Atlas → your cluster → Search → **Create Search Index** → JSON Editor:
+**1. Policy vector index** — Atlas → your cluster → Search → Create Search Index → JSON Editor:
 - Database/collection: `quick_commerce_db.policies`
 - Index name: `policy_vector_index`
 ```json
@@ -299,10 +319,26 @@ In Atlas → your cluster → Search → **Create Search Index** → JSON Editor
 }
 ```
 
+**2. Product fuzzy-search index** — same process, different collection:
+- Database/collection: `quick_commerce_db.products`
+- Index name: `products_search`
+```json
+{
+  "mappings": {
+    "dynamic": false,
+    "fields": {
+      "name": { "type": "string" },
+      "tags": { "type": "string" },
+      "category": { "type": "string" }
+    }
+  }
+}
+```
+
 ### Run
 
 ```bash
-# Backend (runs both the main API on 8000 and the admin WebSocket on 8001)
+# Backend (runs both the main API on 8000 and the admin WebSocket on 8001, one process)
 PYTHONPATH=. python -m backend.app.run
 
 # Frontend (separate terminal)
@@ -319,11 +355,13 @@ PYTHONPATH=. streamlit run frontend/Home.py
 |---|---|---|
 | `MONGODB_URI` | Yes | Atlas connection string, with credentials |
 | `GEMINI_API_KEY` | Yes | Primary LLM |
+| `TAVILY_API_KEY` | Recommended | Powers CRAG's web-search correction path; without it, that path degrades gracefully to "web search not configured" |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | No | Fallback chain |
-| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | No | Required only for WhatsApp |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_WHATSAPP_NUMBER` | No | Required only for WhatsApp |
 | `CLOUDINARY_*` | No | Required only for image uploads |
 | `ADMIN_WS_TOKEN` | Recommended | Shared-secret auth for `/ws/admin` |
 | `ADMIN_WS_PORT` | No (defaults to 8001) | The admin WebSocket runs on its own port, in the same process as the main API, so `ConnectionManager`'s in-memory state stays shared for handoff broadcasts |
+| `CORS_ORIGINS` | Yes in production | Must be an explicit JSON array of allowed origins (e.g. `["https://your-frontend-url"]`) when `ENVIRONMENT=production` — a validator rejects the wildcard default and the app refuses to start rather than silently run with an insecure CORS policy |
 
 **`frontend/.streamlit/secrets.toml`**
 
@@ -335,32 +373,25 @@ ADMIN_WS_TOKEN = "same value as backend"
 
 ---
 
-## Running Tests
-
-```bash
-PYTHONPATH=. pytest backend/tests -v
-```
-
-Covers: router intent mapping, refund audit/pricing/dedup logic, QA retry-cycle routing, discovery match-threshold logic and context-preservation, planner/dispatcher subgraph selection, and the master graph's `interrupt_after` handoff configuration.
-
----
-
 ## Deployment
 
-CI/CD via GitHub Actions (`.github/workflows/ci_cd.yml`): runs tests → builds and pushes Docker images to ECR → deploys to ECS Fargate.
+CI/CD via GitHub Actions (`.github/workflows/ci_cd.yml`): builds and pushes Docker images to ECR (tagged both by commit SHA and `latest`, with GitHub Actions cache to avoid re-downloading heavy dependencies like `torch`/`whisper`/`docling` on every run) → renders both task definitions from GitHub secrets → registers new task definition revisions → forces both ECS services to redeploy.
 
-- **Backend**: ECS Fargate (single task) runs two ports in one process — the main API on **8000** (fronted by API Gateway → VPC Link → NLB) and the admin WebSocket (`/ws/admin`) on its own port **8001**, routed directly through a separate NLB listener that bypasses API Gateway entirely, since HTTP APIs don't proxy raw WebSocket connections. Both ports share the same process so `ConnectionManager`'s in-memory handoff-broadcast state stays valid.
-- **Frontend**: ECS Fargate (Streamlit requires a live server, not static hosting) → NLB directly → users. No CDN layer — evaluated CloudFront and deliberately excluded it, since the app is session-driven and dynamic (WebSocket reruns, live chat) with little genuinely cacheable content, so it added cost and a cache-invalidation step without a real latency or reliability benefit.
-- **No ALB** — a single backend task has nothing to load-balance across, so NLB (Layer 4, cheaper, and a more natural fit for the WebSocket route) is sufficient; ALB's routing/algorithm features aren't needed without multiple targets.
-- **Rate limiting**: configured at the API Gateway stage level (throttling: requests/second + burst limit), protecting against runaway LLM API costs from request abuse — independent of backend task count.
+- **Backend**: ECS Fargate, single task, one process serving two ports directly via `run.py`'s `asyncio.gather` — the main API on **8000** and the admin WebSocket on **8001**. Both are fronted by a single **Network Load Balancer** (`quick-commerce-backend-nlb`) with two separate TCP listeners, one per port, each routed to its own target group.
+- **Frontend**: ECS Fargate (Streamlit requires a live server, not static hosting), fronted by its own NLB on port **8501**.
+- **No API Gateway.** Originally planned for stage-level rate limiting, but deliberately dropped after evaluating the added setup complexity (HTTP API + VPC Link) against the actual risk profile of this deployment — the frontend now talks to the backend NLB directly. This is a real, considered trade-off, not an oversight: rate limiting can be reintroduced later as a pure infrastructure change (API Gateway in front of the existing NLB) with zero application code changes, if this deployment is ever shared publicly at a scale where that risk matters.
+- **No ALB.** A single backend task has nothing to load-balance across, so NLB (Layer 4, cheaper, and a more natural fit for the WebSocket route) is sufficient.
+- **No CloudFront.** Evaluated and excluded — the app is session-driven and dynamic (WebSocket reruns, live chat) with little genuinely cacheable content, so a CDN layer would add cost and a cache-invalidation step without a real benefit.
 
 ---
 
 ## Known Limitations
 
-- Single shared demo account across web and WhatsApp — no per-user authentication.
+- Single shared demo account across web and WhatsApp — no per-user authentication, by design.
 - Admin WebSocket auth is a single shared token, not per-agent identity.
 - Runs a single backend ECS task by design — `ConnectionManager`'s admin WebSocket state is in-memory, so scaling to multiple concurrent backend tasks would need a distributed pub/sub (e.g. Redis) for handoff broadcasts to reach an admin connected to a different task than the one that triggered the alert.
-- The `refuse` intent is LLM-classified, not backed by a dedicated moderation API — a reasonable mitigation for a demo/portfolio project, but not a hard guarantee the way a non-LLM classifier layer would be in a production system handling arbitrary public traffic.
-- `check_inventory`'s typo correction is vocabulary-based (`difflib`), not a true fuzzy/semantic product search.
-- Two dashboard metrics (AI Resolution Rate, Avg Sentiment Score) are placeholder values, not computed from real data.
+- No API Gateway means no request rate limiting at present — acceptable for the current controlled-access deployment, worth revisiting before any public/unattended sharing of the URL.
+- The `refuse` intent is LLM-classified, not backed by a dedicated moderation API — a reasonable mitigation for a demo/portfolio project, not a hard guarantee.
+- `check_inventory`'s fuzzy matching is single-collection Atlas Search (typo/edit-distance tolerant), not a semantic vector search the way policy retrieval is — a query like "milk substitute" won't semantically match "almond milk" the way true embedding-based product search would.
+- Two admin dashboard metrics (AI Resolution Rate, Avg Sentiment Score) are placeholder values, not computed from real data.
+- WhatsApp media ingestion stays inline in `webhooks.py` rather than routed through the shared `ingestion_node` — a deliberate scope decision, since unifying the two would require handling Twilio's URL-based media delivery differently from web's base64-upload shape.
