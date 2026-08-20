@@ -31,6 +31,7 @@ pillow>=10.3.0
 cloudinary>=1.40.0
 twilio>=9.1.1
 tavily-python>=0.5.0
+python-multipart>=0.0.9
 
 # Testing & Utilities
 pytest>=8.2.0
