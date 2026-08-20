@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    ADMIN_WS_PORT: int = 8001
     CORS_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
 
     # ------------------------------------------------------------------
@@ -35,6 +36,7 @@ class Settings(BaseSettings):
     MONGODB_URI: str = Field(default="mongodb://localhost:27017")
     MONGODB_DB_NAME: str = "quick_commerce_db"
     POLICY_VECTOR_INDEX_NAME: str = "policy_vector_index"
+    PRODUCTS_SEARCH_INDEX_NAME: str = "products_search"
 
     # ------------------------------------------------------------------
     # LLM Providers & Embeddings
@@ -63,7 +65,7 @@ class Settings(BaseSettings):
     CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
-
+    TAVILY_API_KEY: str = ""
     # ------------------------------------------------------------------
     # Admin WebSocket Auth
     # ------------------------------------------------------------------

@@ -1,0 +1,30 @@
+{
+  "family": "quick-commerce-frontend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::440536347338:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "frontend",
+      "image": "440536347338.dkr.ecr.us-east-1.amazonaws.com/quick-commerce-frontend:latest",
+      "portMappings": [
+        { "containerPort": 8501 }
+      ],
+      "environment": [
+        { "name": "API_BASE_URL", "value": "__API_BASE_URL__" },
+        { "name": "WS_BASE_URL", "value": "__WS_BASE_URL__" },
+        { "name": "ADMIN_WS_TOKEN", "value": "__ADMIN_WS_TOKEN__" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/quick-commerce-frontend",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "frontend"
+        }
+      }
+    }
+  ]
+}

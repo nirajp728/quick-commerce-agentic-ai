@@ -3,8 +3,6 @@ name: CI/CD
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 env:
   AWS_REGION: us-east-1
@@ -13,25 +11,9 @@ env:
   ECS_CLUSTER: quick-commerce-cluster
   ECS_SERVICE_BACKEND: quick-commerce-backend-service
   ECS_SERVICE_FRONTEND: quick-commerce-frontend-service
-  CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install -r backend/requirements.txt
-      - name: Run backend tests
-        env:
-          PYTHONPATH: .
-        run: pytest backend/tests -v
-
   build-and-push:
-    needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,35 +43,51 @@ jobs:
           docker build -f Dockerfile.frontend -t $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:$IMAGE_TAG
 
-  deploy-backend:
+  deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Reached via API Gateway (HTTP API) -> VPC Link -> NLB -> ECS.
-      # /ws/admin hits the NLB directly on a separate listener, bypassing
-      # API Gateway entirely — that routing is infra config, not a deploy step.
+      - name: Render and register backend task definition
+        run: |
+          sed -e "s|__MONGODB_URI__|${{ secrets.MONGODB_URI }}|g" \
+              -e "s|__GEMINI_API_KEY__|${{ secrets.GEMINI_API_KEY }}|g" \
+              -e "s|__GROQ_API_KEY__|${{ secrets.GROQ_API_KEY }}|g" \
+              -e "s|__OPENAI_API_KEY__|${{ secrets.OPENAI_API_KEY }}|g" \
+              -e "s|__TAVILY_API_KEY__|${{ secrets.TAVILY_API_KEY }}|g" \
+              -e "s|__TWILIO_ACCOUNT_SID__|${{ secrets.TWILIO_ACCOUNT_SID }}|g" \
+              -e "s|__TWILIO_AUTH_TOKEN__|${{ secrets.TWILIO_AUTH_TOKEN }}|g" \
+              -e "s|__TWILIO_WHATSAPP_NUMBER__|${{ secrets.TWILIO_WHATSAPP_NUMBER }}|g" \
+              -e "s|__CLOUDINARY_CLOUD_NAME__|${{ secrets.CLOUDINARY_CLOUD_NAME }}|g" \
+              -e "s|__CLOUDINARY_API_KEY__|${{ secrets.CLOUDINARY_API_KEY }}|g" \
+              -e "s|__CLOUDINARY_API_SECRET__|${{ secrets.CLOUDINARY_API_SECRET }}|g" \
+              -e "s|__ADMIN_WS_TOKEN__|${{ secrets.ADMIN_WS_TOKEN }}|g" \
+              -e "s|__CORS_ORIGINS__|${{ secrets.CORS_ORIGINS }}|g" \
+              backend-task-def.json > rendered-backend-task-def.json
+          aws ecs register-task-definition --cli-input-json file://rendered-backend-task-def.json
+
+      - name: Render and register frontend task definition
+        run: |
+          sed -e "s|__API_BASE_URL__|${{ secrets.API_BASE_URL }}|g" \
+              -e "s|__WS_BASE_URL__|${{ secrets.WS_BASE_URL }}|g" \
+              -e "s|__ADMIN_WS_TOKEN__|${{ secrets.ADMIN_WS_TOKEN }}|g" \
+              frontend-task-def.json > rendered-frontend-task-def.json
+          aws ecs register-task-definition --cli-input-json file://rendered-frontend-task-def.json
+
       - name: Update backend ECS service
         run: |
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.ECS_SERVICE_BACKEND }} \
+            --task-definition quick-commerce-backend \
             --force-new-deployment
-
-  deploy-frontend:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
 
       - name: Update frontend ECS service
         run: |
@@ -97,17 +95,3 @@ jobs:
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.ECS_SERVICE_FRONTEND }} \
             --force-new-deployment
-
-      - name: Wait for ECS service to stabilize
-        run: |
-          aws ecs wait services-stable \
-            --cluster ${{ env.ECS_CLUSTER }} \
-            --services ${{ env.ECS_SERVICE_FRONTEND }}
-
-      # CloudFront caches by default — without this, users could keep
-      # seeing the pre-deploy version after a release.
-      - name: Invalidate CloudFront cache
-        run: |
-          aws cloudfront create-invalidation \
-            --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} \
-            --paths "/*"

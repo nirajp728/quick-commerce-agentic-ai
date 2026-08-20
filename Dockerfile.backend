@@ -1,5 +1,6 @@
 FROM python:3.11-slim AS base
 
+# ffmpeg is required by openai-whisper for audio decoding
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -11,6 +12,8 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend ./backend
 
+# backend/.env is NOT copied into the image on purpose — real secrets
+# come from ECS task definition environment variables / Secrets Manager.
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
@@ -21,9 +24,12 @@ RUN python -c "import whisper; whisper.load_model('base')"
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 RUN python -c "from docling.document_converter import DocumentConverter; DocumentConverter()"
 
-EXPOSE 8000
+# 8000 = main API (chat, webhooks, products, profile, checkout)
+# 8001 = admin WebSocket (/ws/admin) — separate port, same process,
+# so the in-memory ConnectionManager singleton stays shared for broadcasts.
+EXPOSE 8000 8001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "backend.app.run"]

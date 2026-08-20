@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from backend.app.graph.state import AgentState
 from backend.app.utils.llm_factory import get_structured_llm
-from backend.app.tools.db_tools import process_refund_credit, check_inventory, check_existing_refund
+from backend.app.tools.db_tools import validate_refund_request, process_refund_credit
 from backend.app.config import settings
 
 logger = logging.getLogger(settings.APP_NAME)
@@ -28,12 +28,28 @@ class RefundExtraction(BaseModel):
 # 2. Nodes
 # ------------------------------------------------------------------
 def extract_slots_node(state: AgentState) -> dict:
+    """
+    Parses the user's latest message and extracts any mentioned refund slots
+    without overwriting existing ones. Attached-image descriptions
+    ('[image shows: ...]') are explicitly excluded as a source for any
+    slot field, including refund_item_name — an image is photo evidence
+    only, captured separately as refund_photo_url. Without this
+    exclusion, a real bug occurred: an unrelated laptop photo attached
+    during the photo-upload step got its vision description ("ASUS
+    Expertbook") extracted as the refund item name, and would have been
+    credited had validate_refund_request not caught it downstream.
+    """
     logger.info("Executing Refund Subgraph: extract_slots_node")
     last_message = state["messages"][-1].content
 
     llm = get_structured_llm(RefundExtraction)
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "Extract any refund details from the user's message. Only extract what is explicitly stated."),
+        ("system", "Extract any refund details from the user's message. Only extract what is explicitly "
+                   "stated as the user's own words describing their refund request — order ID, item name, "
+                   "quantity, and reason. If the message contains an '[image shows: ...]' description from "
+                   "an attached photo, that describes photo evidence only — do NOT extract refund_item_name "
+                   "or any other field from that image description; only use it to confirm a photo was "
+                   "provided (a photo URL is captured separately, not through this extraction)."),
         ("human", "{input}")
     ])
 
@@ -45,12 +61,9 @@ def extract_slots_node(state: AgentState) -> dict:
     if result.refund_quantity: updates["refund_quantity"] = result.refund_quantity
     if result.refund_reason: updates["refund_reason"] = result.refund_reason
 
-    # Deterministic fallback: a bare number reply almost always means the
-    # user is answering the quantity question, even if structured
-    # extraction missed it on a short standalone digit/word.
+    stripped = last_message.strip().lower()
+    number_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
     if "refund_quantity" not in updates and not state.get("refund_quantity"):
-        stripped = last_message.strip().lower()
-        number_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
         if stripped.isdigit():
             updates["refund_quantity"] = int(stripped)
         elif stripped in number_words:
@@ -90,7 +103,10 @@ def audit_slots_node(state: AgentState) -> dict:
 
 def execute_refund_node(state: AgentState) -> dict:
     """
-    Fires the DB tool to credit the user's wallet, clears the slots, and confirms.
+    Validates the refund against real order data (does the order exist,
+    was this item actually in it, has it already been refunded), then
+    credits the wallet using the order's REAL recorded price — not a
+    separate, potentially divergent inventory lookup.
     """
     logger.info("Executing Refund Subgraph: execute_refund_node")
 
@@ -99,11 +115,16 @@ def execute_refund_node(state: AgentState) -> dict:
     item_name = state["refund_item_name"]
     quantity = int(state.get("refund_quantity", 1))
 
-    # Prevent double-crediting the same order/item
-    dup_check = json.loads(check_existing_refund.invoke({"order_id": order_id, "item_name": item_name}))
-    if dup_check.get("already_refunded"):
+    validation = json.loads(validate_refund_request.invoke({
+        "phone_number": phone_number,
+        "order_id": order_id,
+        "item_name": item_name,
+    }))
+
+    if not validation.get("valid"):
+        logger.warning(f"Refund validation failed: {validation.get('reason')}")
         return {
-            "messages": [AIMessage(content="Looks like this item was already refunded earlier — no further credit needed.")],
+            "messages": [AIMessage(content=validation.get("message", "I couldn't validate that refund request."))],
             "refund_order_id": None,
             "refund_item_name": None,
             "refund_quantity": None,
@@ -112,19 +133,18 @@ def execute_refund_node(state: AgentState) -> dict:
             "current_intent": "clarify"
         }
 
-    # Look up the real item price instead of a flat amount
-    lookup = json.loads(check_inventory.invoke({"query": item_name, "limit": 1}))
-    unit_price = lookup["items"][0]["price"] if lookup.get("status") == "success" else 50.0
+    unit_price = validation["unit_price"]
+    matched_item_name = validation["matched_item_name"]
     refund_amount = unit_price * quantity
 
     process_refund_credit.invoke({
         "phone_number": phone_number,
         "amount": refund_amount,
         "order_id": order_id,
-        "item_name": item_name,
+        "item_name": matched_item_name,
     })
 
-    msg = f"Success! I've processed a refund of ₹{refund_amount} for your {item_name}. The amount has been credited to your wallet balance."
+    msg = f"Success! I've processed a refund of ₹{refund_amount} for your {matched_item_name}. The amount has been credited to your wallet balance."
 
     return {
         "messages": [AIMessage(content=msg)],

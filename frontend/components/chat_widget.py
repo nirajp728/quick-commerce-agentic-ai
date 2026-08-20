@@ -6,27 +6,41 @@ from streamlit_autorefresh import st_autorefresh
 from frontend.services.api_client import send_chat_message, get_backend_base_url
 
 def render_chat_widget():
+    """
+    Renders the chat UI. While a thread is handed off to a human admin,
+    this polls the backend for admin replies and the moment the AI
+    resumes — WhatsApp gets equivalent behavior for free via Twilio push,
+    but the web channel has no push transport, so polling is the fix.
+    """
     st.markdown("### 🤖 Quick-Commerce Assistant")
     st.caption("Ask for recipes, check your cart, or process a refund!")
 
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = f"web:{uuid.uuid4().hex[:8]}"
+
     if "messages" not in st.session_state:
         st.session_state.messages = [
             {"role": "assistant", "content": "Hi there! I can help you find products, plan meals, or process a refund. What do you need today?"}
         ]
+
     if "cart" not in st.session_state:
         st.session_state.cart = []
+
     if "is_handed_off" not in st.session_state:
         st.session_state.is_handed_off = False
+
     if "synced_message_count" not in st.session_state:
         st.session_state.synced_message_count = len(st.session_state.messages)
+
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
 
     if st.session_state.is_handed_off:
         st_autorefresh(interval=4000, key="handoff_poll")
         _sync_from_backend()
 
     chat_container = st.container(height=500)
+
     with chat_container:
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
@@ -40,7 +54,11 @@ def render_chat_widget():
         type=["jpg", "jpeg", "png", "ogg", "mp3", "wav", "pdf"],
         disabled=st.session_state.is_handed_off,
         label_visibility="collapsed",
+        key=f"file_uploader_{st.session_state.uploader_key}",
     )
+
+    if uploaded_file is not None:
+        st.caption(f"📎 Attached: {uploaded_file.name} — will be sent with your next message")
 
     if prompt := st.chat_input("Type your message here...", disabled=st.session_state.is_handed_off):
         file_data, file_content_type = None, None
@@ -53,6 +71,8 @@ def render_chat_widget():
         with chat_container:
             with st.chat_message("user"):
                 st.markdown(prompt)
+                if uploaded_file is not None:
+                    st.caption(f"📎 {uploaded_file.name}")
 
         with chat_container:
             with st.chat_message("assistant"):
@@ -69,8 +89,14 @@ def render_chat_widget():
         st.session_state.messages.append({"role": "assistant", "content": ai_response})
         st.session_state.synced_message_count = len(st.session_state.messages)
 
+        # Force the uploader to reset by changing its key, so the
+        # attachment doesn't silently persist into future turns.
+        if uploaded_file is not None:
+            st.session_state.uploader_key += 1
+
         if "chat_cart" in result:
             st.session_state.cart = result["chat_cart"]
+
         if result.get("is_handed_off"):
             st.session_state.is_handed_off = True
             st.rerun()
@@ -78,7 +104,10 @@ def render_chat_widget():
 
 def _sync_from_backend():
     try:
-        resp = requests.get(f"{get_backend_base_url()}/thread_state/{st.session_state.thread_id}", timeout=5)
+        resp = requests.get(
+            f"{get_backend_base_url()}/thread_state/{st.session_state.thread_id}",
+            timeout=5,
+        )
         if resp.status_code != 200:
             return
         data = resp.json()

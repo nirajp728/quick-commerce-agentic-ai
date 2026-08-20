@@ -1,0 +1,43 @@
+{
+  "family": "quick-commerce-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::440536347338:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "backend",
+      "image": "440536347338.dkr.ecr.us-east-1.amazonaws.com/quick-commerce-backend:latest",
+      "portMappings": [
+        { "containerPort": 8000 },
+        { "containerPort": 8001 }
+      ],
+      "environment": [
+        { "name": "ENVIRONMENT", "value": "production" },
+        { "name": "MONGODB_DB_NAME", "value": "quick_commerce_db" },
+        { "name": "MONGODB_URI", "value": "__MONGODB_URI__" },
+        { "name": "GEMINI_API_KEY", "value": "__GEMINI_API_KEY__" },
+        { "name": "GROQ_API_KEY", "value": "__GROQ_API_KEY__" },
+        { "name": "OPENAI_API_KEY", "value": "__OPENAI_API_KEY__" },
+        { "name": "TWILIO_ACCOUNT_SID", "value": "__TWILIO_ACCOUNT_SID__" },
+        { "name": "TWILIO_AUTH_TOKEN", "value": "__TWILIO_AUTH_TOKEN__" },
+        { "name": "TWILIO_WHATSAPP_NUMBER", "value": "__TWILIO_WHATSAPP_NUMBER__" },
+        { "name": "CLOUDINARY_CLOUD_NAME", "value": "__CLOUDINARY_CLOUD_NAME__" },
+        { "name": "CLOUDINARY_API_KEY", "value": "__CLOUDINARY_API_KEY__" },
+        { "name": "CLOUDINARY_API_SECRET", "value": "__CLOUDINARY_API_SECRET__" },
+        { "name": "ADMIN_WS_TOKEN", "value": "__ADMIN_WS_TOKEN__" },
+        { "name": "CORS_ORIGINS", "value": "__CORS_ORIGINS__" },
+        { "name": "TAVILY_API_KEY", "value": "__TAVILY_API_KEY__" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/quick-commerce-backend",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "backend"
+        }
+      }
+    }
+  ]
+}

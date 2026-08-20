@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 from backend.app.config import settings
 from backend.app.graph.master_graph import get_compiled_graph_with_checkpointer
 from backend.app.services.twilio_service import send_whatsapp_message
-from backend.app.services.media_ingestion import upload_image_to_cloud, transcribe_audio, extract_pdf_from_twilio
+from backend.app.services.media_ingestion import upload_image_to_cloud, describe_image, transcribe_audio, extract_pdf_from_twilio
 
 logger = logging.getLogger(settings.APP_NAME)
 router = APIRouter()
@@ -22,6 +22,13 @@ async def twilio_whatsapp_webhook(
     MediaUrl0: Optional[str] = Form(None),
     MediaContentType0: Optional[str] = Form(None),
 ):
+    """
+    NOTE: WhatsApp media is still ingested here, inline, before the graph
+    runs — not through ingestion_node like web chat. Twilio delivers media
+    as a URL (needs an async download step), while ingestion_node expects
+    base64 bytes already in state, matching web's upload shape. Unifying
+    these is a follow-up, not solved in this pass.
+    """
     logger.info(f"Received WhatsApp message from {From}: {Body} (media: {NumMedia})")
     background_tasks.add_task(process_langgraph_agent, From, Body, NumMedia, MediaUrl0, MediaContentType0)
     return {"status": "processing"}
@@ -31,7 +38,9 @@ async def _ingest_media(media_url: str, content_type: str) -> dict:
     if content_type.startswith("audio"):
         return {"transcript": await transcribe_audio(media_url, auth)}
     if content_type.startswith("image"):
-        return {"photo_url": await upload_image_to_cloud(media_url, auth)}
+        description = await describe_image(media_url, auth)
+        url = await upload_image_to_cloud(media_url, auth)
+        return {"photo_description": description, "photo_url": url}
     if content_type == "application/pdf":
         return {"pdf_text": await extract_pdf_from_twilio(media_url, auth)}
     return {}
@@ -47,8 +56,8 @@ def process_langgraph_agent(
             ingested = asyncio.run(_ingest_media(media_url, content_type or ""))
             if "transcript" in ingested:
                 effective_message = f"{message_body} {ingested['transcript']}".strip()
-            elif "photo_url" in ingested:
-                effective_message = f"{message_body} [attached photo: {ingested['photo_url']}]".strip()
+            elif "photo_description" in ingested:
+                effective_message = f"{message_body} [image shows: {ingested['photo_description']}] [attached photo: {ingested['photo_url']}]".strip()
             elif "pdf_text" in ingested:
                 effective_message = f"{message_body} [attached document: {ingested['pdf_text'][:1000]}]".strip()
 
@@ -58,6 +67,8 @@ def process_langgraph_agent(
             "messages": [HumanMessage(content=effective_message)],
             "user_profile": {"phone_number": phone_number},
             "thread_id": phone_number,
+            "attachment_data": None,
+            "attachment_content_type": None,
         }
         output_state = graph.invoke(input_state, config=config)
         final_message = output_state["messages"][-1].content

@@ -9,50 +9,61 @@ from backend.app.config import settings
 
 logger = logging.getLogger(settings.APP_NAME)
 
+REFUND_SLOT_FIELDS = ["refund_order_id", "refund_item_name", "refund_quantity", "refund_reason", "refund_photo_url"]
+
 class DispatchTask(BaseModel):
-    target: Literal["qa", "discovery"] = Field(
-        description="'qa' for store policies or the user's own order history; "
-                    "'discovery' for product availability, prices, or recipe/ingredient lookups."
+    target: Literal["cart", "refund", "qa", "discovery"] = Field(
+        description="'cart' to add/remove items in the shopping cart. 'refund' for refund/complaint requests "
+                    "OR to continue an already-in-progress refund. 'qa' for store policy, order history, or "
+                    "general knowledge questions. 'discovery' to check real-time product availability/price."
     )
-    query: str = Field(description="A clean, self-contained query for that subgraph — rewritten, not copied verbatim.")
+    query: str = Field(description="A clean, self-contained instruction/query for that subgraph.")
 
 class DispatchPlan(BaseModel):
-    tasks: List[DispatchTask] = Field(description="Gathering tasks needed to answer the user's CURRENT question. Usually just one.")
+    tasks: List[DispatchTask] = Field(description="One or more tasks needed to handle the user's CURRENT request. Can be multiple across different targets in the same turn.")
 
 def _build_transcript(messages) -> str:
     return "\n".join(f"{'User' if m.type == 'human' else 'Assistant'}: {m.content}" for m in messages)
 
+def _refund_progress_note(state: AgentState) -> str:
+    if not state.get("refund_order_id"):
+        return ""
+    filled = [f for f in REFUND_SLOT_FIELDS if state.get(f)]
+    missing = [f for f in REFUND_SLOT_FIELDS if not state.get(f)]
+    if not missing:
+        return ""
+    return (f"\n\nNOTE: A refund is already in progress (order {state.get('refund_order_id')}). "
+            f"Filled: {filled}. Still missing: {missing}.\n"
+            f"MANDATORY: dispatch a 'refund' task with the user's message as the query, ALWAYS, whenever "
+            f"a refund is in progress — refund's own logic will extract whatever slot info is present and "
+            f"re-ask if still incomplete, so there is no downside to always including it.\n"
+            f"ADDITIONALLY, if the user's message asks ANYTHING that requires looking up real data you "
+            f"don't already have — what items were in the order, order status, order date, or any other "
+            f"factual question about this order — you MUST ALSO dispatch a 'qa' task in the SAME turn with "
+            f"a query asking about that order's contents. Do not rely on the refund subgraph to answer "
+            f"factual questions about the order; it cannot look anything up. When in doubt about whether "
+            f"a question needs a lookup, dispatch 'qa' anyway — there is no cost to an extra qa task that "
+            f"turns out unnecessary, but a missing one leaves the user's question unanswered.")
+
 def planner_node(state: AgentState) -> dict:
-    """Decides which subgraph(s) to invoke and what to ask each, based on
-    the full conversation — distinguishing the live question from anything
-    already resolved earlier in the thread."""
     logger.info("Executing Planner Node...")
     transcript = _build_transcript(state.get("messages", []))
+    refund_note = _refund_progress_note(state)
 
     system_prompt = """You are a planning agent for a quick-commerce assistant.
-    Two gathering subgraphs are available:
-    - qa: searches store policy documents (refunds, delivery, cancellation) and the user's own order history.
+    Four subgraphs are available:
+    - cart: adds or removes items in the user's shopping cart.
+    - refund: handles refund/complaint requests for a past order (slot-filling: order id, item, qty, reason, photo).
+    - qa: answers store policy questions, the user's own order history, or general-knowledge questions
+      (uses the store's vector database first, and falls back to a live web search if that's insufficient).
     - discovery: checks the live product catalog for what's currently in stock and at what price.
       Discovery does NOT know facts about the world (recipes, dish ingredients, general knowledge) —
       it can only tell you whether a specific item is available in the store.
 
-    Read the full conversation and decide which subgraph(s), if any, are needed to gather store-specific
-    facts for the user's CURRENT question. If the question needs a general-knowledge answer (e.g. "what
-    are the ingredients for X"), that will be answered directly using the model's own knowledge — dispatch
-    to discovery only for the part that requires checking real store data.
-
-    IMPORTANT: if the user asks, even implicitly, whether ANY specific named item is available, in stock,
-    or carried by the store (e.g. "do you have X", "what about X", "is X on this app"), you MUST dispatch
-    a discovery task for that exact item — never leave stock/availability questions unverified, even if
-    the message also contains a general-knowledge part you'll answer directly.
-
-    CRITICAL: the query you write for each dispatched subgraph must be self-contained. If the user's
-    current message uses a reference like "it", "that", "the item", or omits the product name entirely
-    because it was already named earlier in the conversation, resolve it to the actual specific item name
-    from earlier turns before writing the query — never dispatch a vague or unresolved term.
-
-    If no store data is needed at all, return an empty task list. Form a specific, self-contained query
-    for each dispatched subgraph."""
+    Read the full conversation and decide which subgraph(s) are needed to fully handle the user's
+    CURRENT request. A single request can need more than one — e.g. "what are burger ingredients and
+    do you have them, add what's available" needs both a qa/discovery-style check AND a cart task.
+    """ + refund_note
 
     plan: DispatchPlan = (
         ChatPromptTemplate.from_messages([

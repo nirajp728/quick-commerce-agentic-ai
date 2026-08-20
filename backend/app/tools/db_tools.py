@@ -1,4 +1,3 @@
-import difflib
 import json
 import logging
 from datetime import datetime, timezone
@@ -16,62 +15,64 @@ from backend.app.db.mongo_client import (
 
 logger = logging.getLogger(settings.APP_NAME)
 
-def _correct_typo(query: str, collection) -> str:
-    """
-    Builds the real vocabulary (product name words + tags + categories)
-    from the catalog and corrects the query against it if there's a close
-    match. This only fixes typos against products that actually exist —
-    it can't invent matches for products that aren't in the catalog at all.
-    """
-    vocabulary = set()
-    for doc in collection.find({}, {"name": 1, "tags": 1, "category": 1}):
-        vocabulary.update(w.lower() for w in doc.get("name", "").split())
-        vocabulary.update(t.lower() for t in doc.get("tags", []))
-        if doc.get("category"):
-            vocabulary.add(doc["category"].lower())
-
-    matches = difflib.get_close_matches(query.lower(), vocabulary, n=1, cutoff=0.6)
-    return matches[0] if matches else query
-
 @tool
 def check_inventory(query: str, limit: int = 3) -> str:
     """
     Searches the Quick-Commerce database for a product based on a natural
-    language query. Corrects likely typos against real catalog terms first,
-    then builds an exact MongoDB query against name/tags/category.
-    Returns JSON string with product details, pricing, and stock availability.
+    language query, using MongoDB Atlas Search's fuzzy text matching
+    against name, tags, and category. Stock/availability filtering happens
+    in a separate $match stage after $search, since in_stock/stock_qty
+    aren't part of the search index mapping. Returns JSON string with
+    product details, pricing, and stock availability.
     """
     logger.info(f"Executing check_inventory tool for query: '{query}'")
     collection = get_sync_products_collection()
 
-    corrected = _correct_typo(query, collection)
-    if corrected != query.lower():
-        logger.info(f"check_inventory: corrected '{query}' -> '{corrected}'")
+    pipeline = [
+        {
+            "$search": {
+                "index": settings.PRODUCTS_SEARCH_INDEX_NAME,
+                "text": {
+                    "query": query,
+                    "path": ["name", "tags", "category"],
+                    "fuzzy": {"maxEdits": 1, "prefixLength": 2}
+                }
+            }
+        },
+        {"$match": {"in_stock": True, "stock_qty": {"$gt": 0}}},
+        {"$limit": limit},
+        {
+            "$project": {
+                "_id": 0,
+                "product_id": 1,
+                "name": 1,
+                "price": 1,
+                "in_stock": 1,
+                "stock_qty": 1,
+                "score": {"$meta": "searchScore"}
+            }
+        }
+    ]
 
-    search_filter = {
-        "in_stock": True,
-        "stock_qty": {"$gt": 0},
-        "$or": [
-            {"name": {"$regex": corrected, "$options": "i"}},
-            {"tags": {"$regex": corrected, "$options": "i"}},
-            {"category": {"$regex": corrected, "$options": "i"}}
-        ]
-    }
-
-    results = list(collection.find(search_filter).limit(limit))
+    try:
+        results = list(collection.aggregate(pipeline))
+    except Exception as e:
+        logger.error(f"Atlas Search query failed: {e}")
+        return json.dumps({"status": "error", "message": "Product search is temporarily unavailable."})
 
     if not results:
         return json.dumps({"status": "no_matches_found", "query": query})
 
-    formatted_results = []
-    for item in results:
-        formatted_results.append({
+    formatted_results = [
+        {
             "product_id": item["product_id"],
             "name": item["name"],
             "price": item["price"],
             "in_stock": item["in_stock"],
-            "stock_qty": item["stock_qty"]
-        })
+            "stock_qty": item["stock_qty"],
+        }
+        for item in results
+    ]
 
     return json.dumps({"status": "success", "items": formatted_results})
 
@@ -109,21 +110,67 @@ def check_order_history(phone_number: str, order_id: str = "", status: str = "")
     return json.dumps({"status": "success", "orders": results})
 
 @tool
-def check_existing_refund(order_id: str, item_name: str) -> str:
+def validate_refund_request(phone_number: str, order_id: str, item_name: str) -> str:
     """
-    Checks whether this order/item combination has already been refunded,
-    to prevent crediting the same refund twice.
+    Validates a refund request against real order data before it's allowed
+    to proceed. Checks, in order: (1) does this order exist for this user,
+    (2) was this item actually part of that order, (3) has it already been
+    refunded. Returns the real matched item name and its real unit price
+    from the order if valid, or an explanation of which check failed.
     """
-    collection = get_sync_refunds_collection()
-    existing = collection.find_one({"order_id": order_id, "item_name": item_name})
-    return json.dumps({"already_refunded": existing is not None})
+    logger.info(f"Validating refund: phone={phone_number}, order={order_id}, item={item_name}")
+    orders_collection = get_sync_db()["orders"]
+    order = orders_collection.find_one({"order_id": order_id, "phone_number": phone_number})
+
+    if not order:
+        return json.dumps({
+            "valid": False,
+            "reason": "order_not_found",
+            "message": f"No order with ID {order_id} was found for this account."
+        })
+
+    order_items = order.get("items", [])
+    order_item_names = [i["name"].lower() for i in order_items]
+    item_name_lower = item_name.lower()
+    item_match = next(
+        (n for n in order_item_names if item_name_lower in n or n in item_name_lower),
+        None
+    )
+
+    if not item_match:
+        return json.dumps({
+            "valid": False,
+            "reason": "item_not_in_order",
+            "message": f"\"{item_name}\" was not found in order {order_id}. "
+                       f"That order contained: {', '.join(order_item_names)}."
+        })
+
+    refunds_collection = get_sync_refunds_collection()
+    existing = refunds_collection.find_one({
+        "order_id": order_id,
+        "item_name": {"$regex": item_match, "$options": "i"}
+    })
+    if existing:
+        return json.dumps({
+            "valid": False,
+            "reason": "already_refunded",
+            "message": f"{item_match} from order {order_id} has already been refunded."
+        })
+
+    matched_item = next(i for i in order_items if i["name"].lower() == item_match)
+    return json.dumps({
+        "valid": True,
+        "matched_item_name": matched_item["name"],
+        "unit_price": matched_item["price"]
+    })
 
 @tool
 def process_refund_credit(phone_number: str, amount: float, order_id: str = "", item_name: str = "") -> str:
     """
     Atomically credits the user's wallet balance in MongoDB and logs the
     refund to the refunds collection for history/dedup purposes.
-    Call this ONLY when all refund slots have been validated.
+    Call this ONLY after validate_refund_request has confirmed the refund
+    is valid.
     """
     logger.info(f"Processing refund of ₹{amount} for user: {phone_number}")
     users_collection = get_sync_users_collection()
